@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>My Personal LaTeX Editor</title>
+<link rel="stylesheet" href="./lib/katex/katex.min.css">
+<script src="./lib/katex/katex.min.js"></script>
+
+
+  <style>
+    body { margin: 0; padding: 0; display: flex; flex-direction: column; height: 100vh; font-family: sans-serif; background-color: #282c34; overflow: hidden; }
+    #toolbar { background-color: #21252b; display: flex; align-items: center; border-bottom: 2px solid #181a1f; height: 40px; padding: 0 10px; flex: none; }
+    .dropdown { position: relative; display: inline-block; height: 100%; }
+    .dropbtn { background-color: transparent; color: #abb2bf; padding: 0 15px; font-size: 14px; border: none; cursor: pointer; height: 100%; display: flex; align-items: center; }
+    .dropbtn:hover { background-color: #2c313a; color: white; }
+    .dropdown-content { display: none; position: absolute; background-color: #282c34; min-width: 180px; box-shadow: 0px 8px 16px 0px rgba(0,0,0,0.5); z-index: 1000; border: 1px solid #181a1f; border-top: none; }
+    .dropdown-content a { color: #abb2bf; padding: 12px 16px; text-decoration: none; display: block; font-size: 13px; cursor: pointer; }
+    .dropdown-content a:hover { background-color: #3e4451; color: white; }
+    .dropdown:hover .dropdown-content { display: block; }
+    
+    #btn-compile { margin-left: auto; background-color: #98c379; color: #282c34; padding: 6px 16px; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; font-size: 14px; }
+    #btn-compile:hover { background-color: #7cb659; }
+
+    #main-content { display: flex; flex: 1; overflow: hidden; }
+
+/* ✨ 덮어쓸 코드 (💡 핵심: min-width: 0; 을 추가하여 화면 밖으로 밀려나는 것을 원천 차단합니다!) */
+    #left-panel { display: flex; flex-direction: column; flex: 1; border-right: 2px solid #181a1f; position: relative; min-width: 0; }
+
+
+
+/* 💡 폭과 높이를 100% 강제하여 스크롤바가 우측 사이드바 경계선에 단 1px 오차도 없이 밀착되게 합니다! */
+    #editor-container { flex: 1; width: 100%; min-width: 0; min-height: 0; position: relative; overflow: hidden; }
+    #media-viewer { display: none; flex: 1; background: #1e1e1e; overflow: auto; text-align: center; }
+    #log-container { height: 150px; flex: none; background: #1e1e1e; color: #d4d4d4; padding: 10px; font-family: monospace; font-size: 12px; overflow-y: auto; white-space: pre-wrap; border-top: 2px solid #181a1f; display: block; }
+    #pdf-preview { flex: 1; background-color: #525659; border: none; }
+    
+    .modal { display: none; position: fixed; z-index: 2000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.6); }
+    .modal-content { background-color: #282c34; color: #abb2bf; margin: 5% auto; padding: 20px; border: 1px solid #181a1f; width: 70%; border-radius: 8px; }
+    .close-btn { color: #aaa; float: right; font-size: 28px; font-weight: bold; cursor: pointer; }
+    .close-btn:hover { color: white; }
+    .modal-content select, .modal-content textarea { width: 100%; padding: 8px; margin-top: 5px; margin-bottom: 15px; background: #1e1e1e; color: #d4d4d4; border: 1px solid #5c6370; border-radius: 4px; font-family: monospace; }
+    
+    .action-btn { background-color: #61afef; color: #282c34; padding: 8px 16px; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; margin-right: 10px; }
+    .action-btn:hover { background-color: #4b9cd3; }
+    .reset-btn { background-color: #e06c75; color: white; padding: 8px 16px; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; }
+    .reset-btn:hover { background-color: #c95c65; }
+
+
+/* 💡 탭 바: 가로 스크롤 허용 및 얇은 스크롤바 표시 */
+    #tab-bar { 
+        display: flex; background-color: #21252b; overflow-x: auto; overflow-y: hidden; 
+        flex: none; padding-top: 8px; padding-left: 8px; border-bottom: 1px solid #181a1f; gap: 2px; 
+        max-width: 100%; /* 부모를 뚫고 나가지 못하게 고정 */
+        scrollbar-width: thin; scrollbar-color: #4b5263 #21252b; 
+    }
+    #tab-bar::-webkit-scrollbar { height: 6px; }
+    #tab-bar::-webkit-scrollbar-track { background: #21252b; }
+    #tab-bar::-webkit-scrollbar-thumb { background: #4b5263; border-radius: 3px; }
+
+/* 💡 가로 스크롤을 활성화하고 스크롤바는 숨깁니다 */
+    #tab-bar { display: flex; background-color: #21252b; overflow-x: auto; overflow-y: hidden; border-bottom: 1px solid #181a1f; flex: none; scrollbar-width: none; scroll-behavior: smooth; }
+    #tab-bar::-webkit-scrollbar { display: none; }
+
+    .editor-tab { 
+        position: relative; padding: 6px 12px 6px 16px; background-color: #282c34; color: #abb2bf; 
+        border-right: 1px solid #181a1f; cursor: pointer; display: flex; align-items: center; 
+        font-size: 13px; transition: background-color 0.2s; user-select: none; 
+        border-top-left-radius: 8px; border-top-right-radius: 8px; overflow: hidden; white-space: nowrap; 
+        flex: 0 0 clamp(60px, calc((100vw - 300px) / var(--tab-count, 1)), 160px); /* ✨ 핵심 마법 */
+    }
+    .editor-tab.active { background-color: #1e1e1e !important; color: #61afef !important; border-top: 2px solid #61afef !important; font-weight: bold; padding-top: 8px; margin-top: -2px; z-index: 10; }
+    .tab-close-btn { margin-left: auto; padding-left: 8px; color: #5c6370; font-weight: bold; font-size: 16px; border-radius: 50%; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; transition: all 0.2s; }
+    .tab-close-btn:hover { background-color: rgba(224, 108, 117, 0.15); color: #e06c75; }
+    .editor-tab.drag-over-left { border-left: 3px solid #61afef !important; }
+    .editor-tab.drag-over-right { border-right: 3px solid #61afef !important; }
+
+
+
+
+   
+    /* 드래그 위치 표시선 */
+    .editor-tab.drag-over-left { border-left: 3px solid #61afef !important; }
+    .editor-tab.drag-over-right { border-right: 3px solid #61afef !important; }
+
+/* 💡 에디터 가로 스크롤 보장: 내부 CodeMirror가 크기를 정확히 계산하도록 컨테이너 스크롤은 숨깁니다. */
+    #editor-container { flex: 1; width: 100%; min-width: 0; min-height: 0; position: relative; overflow: hidden; }
+   
+
+
+.editor-tab { 
+        position: relative; padding: 6px 12px 6px 16px; background-color: #282c34; color: #abb2bf; 
+        border-right: 1px solid #181a1f; cursor: pointer; display: flex; align-items: center; 
+        font-size: 13px; transition: background-color 0.2s; user-select: none; 
+        border-top-left-radius: 8px; border-top-right-radius: 8px; overflow: hidden; white-space: nowrap; 
+        flex: 1 1 160px; /* 늘어남 허용, 줄어듦 허용, 기본치 160px */
+        min-width: 80px; /* 💡 아무리 좁아져도 80px 밑으로는 안 줄어듦 -> 여기서부터 스크롤바 생김! */
+        max-width: 160px; /* 최대 160px */
+    }
+    .editor-tab.active { background-color: #1e1e1e !important; color: #61afef !important; border-top: 2px solid #61afef !important; font-weight: bold; padding-top: 8px; margin-top: -2px; z-index: 10; }
+    .tab-close-btn { margin-left: auto; padding-left: 8px; color: #5c6370; font-weight: bold; font-size: 16px; border-radius: 50%; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; transition: all 0.2s; }
+    .tab-close-btn:hover { background-color: rgba(224, 108, 117, 0.15); color: #e06c75; }
+    .editor-tab.drag-over-left { border-left: 3px solid #61afef !important; }
+    .editor-tab.drag-over-right { border-right: 3px solid #61afef !important; }
+
+  /* 💡 새 탭(+) 버튼 우측 고정 (Sticky) */
+.new-tab-btn { 
+        padding: 4px; margin-left: 6px; color: #abb2bf; font-size: 18px; cursor: pointer; 
+        display: flex; align-items: center; justify-content: center; user-select: none; 
+        transition: all 0.2s; border-radius: 50%; height: 26px; min-width: 26px; align-self: center; 
+        margin-bottom: 4px; position: sticky; right: 0; background-color: #21252b; 
+        box-shadow: -4px 0 10px rgba(33, 37, 43, 0.9); z-index: 100; flex: none; 
+    }
+    .new-tab-btn:hover { background-color: #3e4451; color: white; }
+
+    /* 에디터 커서(I-beam) 증발 버그 방어 */
+    .cm-content { cursor: text !important; }
+    .cm-editor { outline: none !important; }
+
+
+
+
+
+
+    #resizer-pdf, #resizer-sidebar { position: relative; display: flex; align-items: center; justify-content: center; cursor: col-resize; }
+    #resizer-log, #resizer-outline { position: relative; display: flex; align-items: center; justify-content: center; cursor: row-resize; }
+    
+    .toggle-btn-v { width: 14px; height: 30px; background-color: #4b5263; color: white; display: flex; align-items: center; justify-content: center; cursor: pointer; border-radius: 4px; font-size: 10px; user-select: none; z-index: 20; }
+    .toggle-btn-h { width: 30px; height: 14px; background-color: #4b5263; color: white; display: flex; align-items: center; justify-content: center; cursor: pointer; border-radius: 4px; font-size: 10px; user-select: none; z-index: 20; }
+    .toggle-btn-v:hover, .toggle-btn-h:hover { background-color: #61afef; }
+
+    .tree-row { padding: 4px 0; cursor: pointer; color: #abb2bf; font-size: 13px; display: flex; align-items: center; user-select: none; white-space: nowrap; }
+    .tree-row:hover { background-color: #2c313a; color: white; }
+    .tree-icon { width: 22px; text-align: center; margin-right: 4px; display: inline-block; font-size: 12px; }
+
+    #context-menu { display: none; position: fixed; background: #282c34; border: 1px solid #181a1f; box-shadow: 0 4px 6px rgba(0,0,0,0.5); z-index: 99999; flex-direction: column; padding: 5px 0; border-radius: 4px; min-width: 150px; }
+    .ctx-item { padding: 8px 20px; cursor: pointer; color: #abb2bf; font-size: 13px; }
+    .ctx-item:hover { background: #3e4451; color: white; }
+
+    /* 💡 신규: 상태 표시줄 & 목차(Outline) & 팔레트 CSS */
+    #status-bar { height: 22px; background: #007acc; color: white; display: flex; align-items: center; padding: 0 10px; font-size: 12px; flex: none; z-index: 100; user-select: none; }
+    #status-bar span { margin-right: 15px; }
+    
+    .outline-item { padding: 4px 10px; color: #abb2bf; font-size: 12px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .outline-item:hover { background: #2c313a; color: white; }
+    .outline-section { font-weight: bold; color: #d19a66; }
+    .outline-subsection { padding-left: 20px; }
+    .outline-subsubsection { padding-left: 30px; font-size: 11px; }
+
+    .cmd-item { padding: 10px 15px; color: #abb2bf; cursor: pointer; font-size: 14px; border-bottom: 1px solid #181a1f; }
+    .cmd-item.selected, .cmd-item:hover { background: #3e4451; color: white; }
+
+/* 💡 설정창 짤림 방지: 최대 높이를 지정하고 스크롤바를 만듭니다 */
+    .modal-content {
+        max-height: 80vh !important; /* 화면 높이의 80%까지만 커짐 */
+        overflow-y: auto !important; /* 넘치면 세로 스크롤바 생성 */
+        margin-top: 5vh !important;  /* 창을 좀 더 위로 끌어올림 */
+    }
+    
+    /* 스크롤바 디자인 (선택사항) */
+    .modal-content::-webkit-scrollbar { width: 8px; }
+    .modal-content::-webkit-scrollbar-track { background: #21252b; border-radius: 4px; }
+    .modal-content::-webkit-scrollbar-thumb { background: #4b5263; border-radius: 4px; }
+
+
+/* 💡 중복으로 뜨는 까만 테두리 프리뷰(latex-suite 내장) 끄기 */
+    .cm-tooltip-latex { display: none !important; }
+  </style>
+</head>
+<body>
+  
+<div id="toolbar">
+    <div class="dropdown">
+      <button class="dropbtn">파일 (File)</button>
+      <div class="dropdown-content">
+        <a id="menu-new">📄 새 파일 (New)</a>
+        <a id="menu-open">📂 불러오기 (Open)</a>
+        <a id="menu-save">💾 저장 (Save)</a>
+        <a id="menu-save-as">📝 다른 이름으로 저장 (Save As)</a>
+      </div>
+    </div>
+    
+    <button id="btn-undo" class="action-btn" style="margin-left: 15px; background-color: #5c6370; padding: 5px 12px; font-size: 12px; border: 1px solid #181a1f; opacity: 0.4; cursor: not-allowed;">↩ Undo</button>
+    <button id="btn-redo" class="action-btn" style="margin-right: auto; background-color: #5c6370; padding: 5px 12px; font-size: 12px; border: 1px solid #181a1f; opacity: 0.4; cursor: not-allowed;">↪ Redo</button>
+
+    <button id="btn-settings" style="margin-left: 10px; background-color: #4b5263; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer;">⚙️ 설정</button>
+    <button id="btn-compile">🚀 저장 & PDF 컴파일</button>
+  </div>
+
+
+
+
+
+  <div id="main-content">
+    
+    <div id="sidebar" style="width: 220px; flex: none; background: #21252b; display: flex; flex-direction: column;">
+      <div id="sidebar-top" style="flex: 2; display: flex; flex-direction: column; overflow: hidden;">
+        <div style="padding: 10px; border-bottom: 1px solid #181a1f;">
+          <button id="btn-open-folder" style="width: 100%; background: #4b5263; color: white; border: none; padding: 6px; cursor: pointer; border-radius: 4px; font-weight: bold;">📂 폴더 열기</button>
+        </div>
+        <div id="file-tree" style="flex: 1; overflow-y: auto;"></div>
+      </div>
+      
+      <div class="resizer-h" id="resizer-outline">
+        <div id="btn-toggle-outline-resizer" class="toggle-btn-h" title="목차 접기/펼치기">▼</div>
+      </div>
+      
+      <div id="outline-container" style="flex: 1; display: flex; flex-direction: column; background: #21252b;">
+         <div style="padding: 5px 10px; font-size: 12px; font-weight: bold; color: #5c6370; background: #181a1f; user-select: none;">📑 문서 개요 (Outline)</div>
+         <div id="outline-list" style="flex: 1; overflow-y: auto; padding: 5px 0;"></div>
+      </div>
+    </div>
+
+    <div class="resizer-v" id="resizer-sidebar">
+      <div id="btn-toggle-sidebar-resizer" class="toggle-btn-v" title="사이드바 접기/펼치기">◀</div>
+    </div>
+
+    <div id="left-panel">
+      
+      <div id="tab-bar"></div>
+      
+      <div id="math-preview-container" style="display: none; position: absolute; background: #fff; border: 2px solid #007acc; border-radius: 6px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); z-index: 1000; flex-direction: column; width: max-content;">
+        <div id="math-preview-header" style="font-size: 11px; color: #fff; background: #007acc; padding: 6px; font-weight: bold; cursor: move; user-select: none; border-top-left-radius: 3px; border-top-right-radius: 3px;">👀 수식 Preview</div>
+        <div id="math-preview-body" style="overflow: hidden; position: relative; background: white; border-bottom-left-radius: 4px; border-bottom-right-radius: 4px; display: flex;">          
+          <iframe id="math-preview-frame" style="position: absolute; top: 0; left: 0; width: calc(100% + 16px); height: calc(100% + 16px); border: none; background: white; margin: -8px 0 0 -8px;"></iframe>
+          <div id="math-preview-katex" style="display: none; padding: 12px 20px; color: black; background: white; font-size: 1.3em; width: max-content; height: max-content; align-items: center; justify-content: center; overflow: hidden;"></div>
+        </div>
+      </div>
+
+      <div id="editor-container"></div>
+
+
+
+
+
+      <div id="media-viewer"></div>
+
+      <div id="status-bar">
+        <span id="status-filename">파일을 열어주세요</span>
+        <span style="margin-left: auto;" id="status-line-col">Ln 1, Col 1</span>
+        <span>UTF-8</span>
+        <span>LaTeX</span>
+      </div>
+
+      <div class="resizer-h" id="resizer-log">
+        <div id="btn-toggle-log-resizer" class="toggle-btn-h" title="콘솔창 접기/펼치기">▼</div>
+      </div>
+      <div id="log-container">> 시스템 준비 완료.</div>
+    </div>
+
+    <div class="resizer-v" id="resizer-pdf">
+      <div id="btn-toggle-pdf-resizer" class="toggle-btn-v" title="PDF 뷰어 접기/펼치기">▶</div>
+    </div>
+    
+    <iframe id="pdf-preview" src=""></iframe>
+  </div>
+
+  <div id="context-menu">
+    <div class="ctx-item" id="ctx-new-file">📄 새 파일 만들기</div>
+    <div class="ctx-item" id="ctx-new-folder">📁 새 폴더 만들기</div>
+    <div class="ctx-item" id="ctx-rename">📝 이름 바꾸기</div>
+    <div class="ctx-item" id="ctx-move">🚚 이동하기 (Move)</div>
+    <div class="ctx-item" id="ctx-delete" style="color: #e06c75;">🗑️ 삭제하기</div>
+  </div>
+  <div id="editor-context-menu" style="display: none; position: fixed; background: #282c34; border: 1px solid #181a1f; box-shadow: 0 4px 6px rgba(0,0,0,0.5); z-index: 99999; flex-direction: column; padding: 5px 0; border-radius: 4px; min-width: 170px;">
+    <div class="ctx-item" id="ctx-editor-undo">↩ 실행 취소 (Undo)</div>
+    <div class="ctx-item" id="ctx-editor-redo">↪ 다시 실행 (Redo)</div>
+    <div style="height: 1px; background: #181a1f; margin: 4px 0;"></div>
+    <div class="ctx-item" id="ctx-editor-cut">✂️ 잘라내기 (Cut)</div>
+    <div class="ctx-item" id="ctx-editor-copy">📋 복사 (Copy)</div>
+    <div class="ctx-item" id="ctx-editor-paste">📝 붙여넣기 (Paste)</div>
+    <div style="height: 1px; background: #181a1f; margin: 4px 0;"></div>
+    <div class="ctx-item" id="ctx-editor-selectall">🟩 모두 선택 (Select All)</div>
+  </div>
+
+  <div id="command-palette" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 999999; background: rgba(0,0,0,0.3); align-items: flex-start; padding-top: 15vh;">
+    <div style="width: 500px; margin: 0 auto; background: #282c34; border: 1px solid #61afef; border-radius: 6px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); display: flex; flex-direction: column; overflow: hidden;">
+      <input type="text" id="cmd-input" placeholder="명령어 검색 (예: 컴파일, 저장...)" style="width: 100%; padding: 15px; background: #1e1e1e; border: none; border-bottom: 1px solid #181a1f; color: white; font-size: 16px; outline: none; box-sizing: border-box;">
+      <div id="cmd-list" style="max-height: 300px; overflow-y: auto;"></div>
+    </div>
+  </div>
+
+  <div id="prompt-modal" class="modal" style="z-index: 999999;">
+    <div class="modal-content" style="width: 350px; text-align: center; margin-top: 15%;">
+      <h3 id="prompt-message" style="color: white; margin-top: 0; font-size: 15px;">이름을 입력하세요</h3>
+      <input type="text" id="prompt-input" style="width: 90%; padding: 8px; margin-bottom: 15px; background: #1e1e1e; color: #d4d4d4; border: 1px solid #61afef; border-radius: 4px; outline: none;" autocomplete="off" />
+      <div style="text-align: right;">
+        <button id="prompt-cancel" class="reset-btn" style="padding: 6px 12px; font-size: 13px;">취소</button>
+        <button id="prompt-ok" class="action-btn" style="padding: 6px 12px; font-size: 13px; margin-right: 0;">확인</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="settings-modal" class="modal">
+    <div class="modal-content">
+      <span class="close-btn" id="close-settings">&times;</span>
+      <h2 style="color: white; margin-top: 0;">⚙️ 에디터 설정</h2>
+
+<label for="compiler-select">1. 빌드 엔진 (Compiler)</label>
+      <select id="compiler-select">
+        <option value="pdflatex">pdflatex (기본/빠름)</option>
+        <option value="xelatex">xelatex (한글 폰트 지원)</option>
+        <option value="lualatex">lualatex (최신/고성능)</option>
+        <option value="latexmk">latexmk (자동 반복 컴파일)</option>
+      </select>
+      
+<label for="preview-engine-select" style="margin-top: 15px; display: block;">2. 수식 프리뷰 엔진 (Preview Engine)</label>
+      <select id="preview-engine-select">
+        <option value="katex">⚡ KaTeX (초고속 / 프론트엔드 전용)</option>
+        <option value="pdflatex">📕 pdflatex (고정밀 / 백엔드 렌더링)</option>
+      </select>
+      
+      <label for="preview-style-select" style="margin-top: 15px; display: block;">3. 수식 프리뷰 위치 (Preview Style)</label>
+      <select id="preview-style-select">
+        <option value="cursor">커서 추적형 (Follow Cursor - 옵시디안 스타일)</option>
+        <option value="drag">우측 하단 고정형 (Drag & Drop)</option>
+        <option value="off">사용 안 함 (Off)</option> 
+      </select>
+
+      <label for="timeout-compile" style="margin-top: 15px; display: block;">4. PDF 빌드 타임아웃 제한 (초)</label>
+      <input type="number" id="timeout-compile" value="60" min="5" max="300" style="width: 100%; padding: 8px; margin-top: 5px; background: #1e1e1e; color: #d4d4d4; border: 1px solid #5c6370; border-radius: 4px; box-sizing: border-box;" title="기본값: 60초">
+
+      <label for="timeout-preview" style="margin-top: 15px; display: block;">5. 수식 프리뷰 타임아웃 제한 (초)</label>
+      <input type="number" id="timeout-preview" value="3" min="1" max="10" style="width: 100%; padding: 8px; margin-top: 5px; background: #1e1e1e; color: #d4d4d4; border: 1px solid #5c6370; border-radius: 4px; box-sizing: border-box;" title="기본값: 3초 (무한루프 방지)">
+      
+      <div style="margin-top: 15px; display: flex; justify-content: space-between; align-items: center;">
+        <label for="preview-ignore-packages" style="display: block;">6. 수식 프리뷰 무시 패키지 (쉼표 구분)</label>
+        <button id="btn-reset-ignore-pkgs" style="background: transparent; border: 1px solid #5c6370; color: #abb2bf; cursor: pointer; border-radius: 4px; padding: 2px 8px; font-size: 11px; transition: 0.2s;">기본값 복구</button>
+      </div>
+      <input type="text" id="preview-ignore-packages" style="width: 100%; padding: 8px; margin-top: 5px; background: #1e1e1e; color: #d4d4d4; border: 1px solid #5c6370; border-radius: 4px; box-sizing: border-box;" title="프리뷰 컴파일 시 임시로 제거할 패키지">
+
+      
+
+
+      
+
+
+      <label for="auto-ime-select" style="margin-top: 15px; display: block;">7. 수식 한/영 자동 전환 (Auto IME)</label>
+      <select id="auto-ime-select" style="width: 100%; padding: 8px; margin-top: 5px; background: #1e1e1e; color: #d4d4d4; border: 1px solid #5c6370; border-radius: 4px;">
+        <option value="on">사용함 (On - 수식 진입 시 영문 자동 전환)</option>
+        <option value="off">사용 안 함 (Off)</option>
+      </select>
+
+      <div style="display: flex; gap: 10px; margin-top: 15px;">
+        <div style="flex: 1;">
+          <label for="ime-code-eng" style="display: block; font-size: 11px;">[Win] 영문 레이아웃 코드</label>
+          <input type="text" id="ime-code-eng" value="1033" style="width: 100%; padding: 8px; margin-top: 5px; background: #1e1e1e; color: #d4d4d4; border: 1px solid #5c6370; border-radius: 4px; box-sizing: border-box;" title="기본값: 1033 (US English)">
+        </div>
+        <div style="flex: 1;">
+          <label for="ime-code-kor" style="display: block; font-size: 11px;">[Win] 한글 레이아웃 코드</label>
+          <input type="text" id="ime-code-kor" value="1042" style="width: 100%; padding: 8px; margin-top: 5px; background: #1e1e1e; color: #d4d4d4; border: 1px solid #5c6370; border-radius: 4px; box-sizing: border-box;" title="기본값: 1042 (Korean)">
+        </div>
+      </div>
+
+<label for="custom-snippets" style="margin-top: 15px; display: block;">8. 스니펫 전체 편집 (JavaScript 배열 형식)</label>
+      <textarea id="custom-snippets" rows="15" spellcheck="false"></textarea>
+      <div style="text-align: right;">
+        <button id="btn-reset-snippets" class="reset-btn">기본 스니펫으로 초기화</button>
+        <button id="btn-save-settings" class="action-btn">저장 및 닫기</button>
+      </div>
+
+
+    </div>
+  </div>
+
+  <script type="module" src="/renderer.js"></script>
+</body>
+</html>
