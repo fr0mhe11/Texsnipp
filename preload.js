@@ -11,15 +11,22 @@ contextBridge.exposeInMainWorld('api', {
   renameFile: (oldPath, newPath) => ipcRenderer.invoke('fs:rename', oldPath, newPath),
   createFolder: (targetPath) => ipcRenderer.invoke('fs:mkdir', targetPath),
   createFile: (targetPath) => ipcRenderer.invoke('fs:createFile', targetPath),
+  watchFile: (filePath) => ipcRenderer.invoke('fs:watch', filePath),
+  unwatchFile: (filePath) => ipcRenderer.invoke('fs:unwatch', filePath),
+  onFileChangedExternally: (callback) => ipcRenderer.on('file-changed-externally', callback),
+ 
+  // 🚀 경로 자동 탐색 및 컴파일 파라미터(customPath, customArgs) 추가
+  detectLatexPath: () => ipcRenderer.invoke('latex:detectPath'),
+  compileLatex: (filePath, engine, timeout, customPath, customArgs) => ipcRenderer.invoke('latex:compile', filePath, engine, timeout, customPath, customArgs),
   
-  // 💡 timeout 파라미터가 추가되었습니다!
-  compileLatex: (filePath, engine, timeout) => ipcRenderer.invoke('latex:compile', filePath, engine, timeout),
-  
-  // 🚨 추가된 핵심 API들 (저장 경고창, 수식 프리뷰 등)
   askSave: (filename) => ipcRenderer.invoke('dialog:askSave', filename),
+  askConfirm: (message) => ipcRenderer.invoke('dialog:confirm', message), // 🚀 네이티브 confirm 통로
   quitApp: () => ipcRenderer.invoke('app:quit'),
   onWindowCloseRequest: (callback) => ipcRenderer.on('window-close-request', callback),
-  switchToEnglish: () => ipcRenderer.invoke('ime:toEnglish'),
-  switchToKorean: () => ipcRenderer.invoke('ime:toKorean'),
+  // 🚀 Linux용 한/영 강제(Absolute) 전환을 위한 파라미터 추가
+  switchToEnglish: (win, linux) => ipcRenderer.invoke('ime:toEnglish', win, linux),
+  switchToKorean: (win, linux) => ipcRenderer.invoke('ime:toKorean', win, linux),
+  
+  blinkConsole: () => ipcRenderer.invoke('dev:blink'),
   previewMath: (preamble, mathContent, timeout) => ipcRenderer.invoke('latex:previewMath', preamble, mathContent, timeout)
 });

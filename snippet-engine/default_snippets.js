@@ -13,6 +13,9 @@ const snippets = [
         description: "Advanced Auto-fraction"
     },
 
+
+
+
     // --- Math Mode Entry ---
    
 
@@ -141,4 +144,4 @@ try {
     console.error("스니펫 불러오기 실패 (문법 오류):", error);
 }
 
-export default finalSnippets;
+export default snippets;

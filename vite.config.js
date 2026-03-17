@@ -1,12 +1,14 @@
-// vite.config.js
 import { defineConfig } from 'vite';
-import path from 'path';
+import { resolve } from 'path';
 
 export default defineConfig({
+  // 빌드 시 절대 경로를 상대 경로로 변환 (Electron 필수 설정)
+  base: './', 
+  
   resolve: {
     alias: {
-      // 코드에서 'src'로 시작하는 경로는 모두 'snippet-engine' 폴더로 연결해줍니다.
-      'src': path.resolve(__dirname, './snippet-engine')
+      // 🚀 핵심: 스니펫 엔진 코드 내부의 'src/...' 경로를 올바른 폴더로 강제 연결합니다.
+      'src': resolve(__dirname, './snippet-engine')
     }
   }
 });

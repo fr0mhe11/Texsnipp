@@ -2,6 +2,7 @@ import { EditorState } from "@codemirror/state";
 import { EditorView, keymap } from "@codemirror/view";
 import { defaultKeymap } from "@codemirror/commands";
 import defaultSnippetsRaw from "./snippet-engine/default_snippets.js?raw";
+import { parseBibTeX, updateBibDatabase, bibCompletionProvider, citeTrigger } from './bibtex.js';
 import { basicSetup } from "codemirror"; 
 import { oneDark } from "@codemirror/theme-one-dark";
 import { latex } from "codemirror-lang-latex";
@@ -11,8 +12,30 @@ import * as cmView from "@codemirror/view";
 import * as cmLanguage from "@codemirror/language";
 import * as cmTooltip from "@codemirror/tooltip";
 import * as cmCommands from "@codemirror/commands";
-
+import { autocompletion } from "@codemirror/autocomplete";
 import { main } from "./snippet-engine/extension.ts";
+console.log("🚨 renderer.js 최상단 로드 성공!");
+// ==========================================
+// 🚀 [만능 커서 부활 & UI 먹통 해결 함수] (진짜 콘솔 개방 모드)
+// ==========================================
+window.forceFocusRecovery = function(targetElement = null) {
+    // 1. 진짜 콘솔창을 강제로 열었다 닫아버림 (100% 리플로우 발생)
+    if (window.api && window.api.blinkConsole) {
+        window.api.blinkConsole();
+     }
+    
+    // 2. 콘솔창이 닫히고 화면이 정리될 즈음(0.15초 뒤)에 커서를 꽂아줌
+    setTimeout(() => {
+        if (targetElement) {
+            targetElement.focus(); 
+        } else if (typeof view !== 'undefined' && view) {
+            view.requestMeasure();
+            view.focus(); 
+        }
+    }, 15);
+};
+
+
 
 const EditorStateProxy = new Proxy(cmState.EditorState, { get: (t, p) => p in t ? t[p] : cmState[p] });
 const EditorViewProxy = new Proxy(cmView.EditorView, { get: (t, p) => p in t ? t[p] : cmView[p] });
@@ -20,53 +43,101 @@ const PrecProxy = new Proxy(cmState.Prec, { get: (t, p) => p === "fallback" ? t.
 
 const codemirror_objects = { ...cmState, ...cmView, ...cmLanguage, ...cmTooltip, ...cmCommands, EditorState: EditorStateProxy, EditorView: EditorViewProxy, Prec: PrecProxy };
 
+// 🚀 [추가] 패키지 상태 변수 & 동적 리로드용 Compartment
+const snippetConfig = new cmState.Compartment();
+let currentActivePackages = new Set();
+
+
+// 🚀 [수정] 빈 배열로 초기화 (나중에 주입됨)
+// ⭕️ 정상 롤백 완료
 const latexSuiteExtension = main(codemirror_objects);
+// 🚀 [추가] 커서 증발 완벽 방어 함수
+function forceEditorReflow() {
+    setTimeout(() => {
+        void document.body.offsetHeight; 
+        window.dispatchEvent(new Event('resize'));
+        if (typeof view !== 'undefined' && view) {
+            view.requestMeasure();
+            view.focus(); 
+        }
+    }, 50);
+}
+
 
 let isSystemChangingContent = false;
 let previewTimeout = null; 
 let lastCompiledMath = ""; 
 let wasInMathMode = false;
-let lastMathEnterTime = 0;// 💡 수식 모드 진입 시간을 기록할 타이머 변수
+let lastMathEnterTime = 0;
 
 const btnUndo = document.getElementById('btn-undo');
 const btnRedo = document.getElementById('btn-redo');
 
+
+
+
+async function scanAndParseBibFiles(folderPath) {
+    const logBox = document.getElementById('log-container');
+    if (!folderPath) return;
+
+    try {
+        const files = await window.api.readDir(folderPath);
+        let newDatabase = [];
+
+        for (const file of files) {
+            if (!file.isDir && file.name.toLowerCase().endsWith('.bib')) {
+                const content = await window.api.readFile(file.fullPath);
+                const entries = parseBibTeX(content);
+                newDatabase.push(...entries);
+            }
+        }
+
+        if (newDatabase.length > 0) {
+            updateBibDatabase(newDatabase); // 🚀 새로 만든 엔진으로 데이터 쏘기
+            if(logBox) {
+                logBox.innerText += `\n> 📚 [Bib 파서] 폴더 내 ${newDatabase.length}개 인용구 로드 완료!`;
+                logBox.scrollTop = logBox.scrollHeight;
+            }
+        }
+    } catch (e) {
+        console.error("Bib 파싱 에러:", e);
+    }
+}
+
+
+// ==========================================
+// 🚀 에디터 업데이트 리스너 (기존 로직)
+// ==========================================
 const ideUpdateListener = EditorView.updateListener.of((update) => {
   if (update.docChanged || update.selectionSet) {
     const pos = update.state.selection.main.head;
     const line = update.state.doc.lineAt(pos);
     const col = pos - line.from + 1;
-    document.getElementById('status-line-col').innerText = `Ln ${line.number}, Col ${col}`;
+    if(document.getElementById('status-line-col')) {
+        document.getElementById('status-line-col').innerText = `Ln ${line.number}, Col ${col}`;
+    }
 
-const text = update.state.doc.toString();
+    const text = update.state.doc.toString();
     const isInMath = !!extractMath(text, pos);
 
-    // 💡 설정에서 '사용 안 함(off)' 이면 OS 전환을 완전히 차단!
     if (localStorage.getItem('latex-auto-ime') !== 'off') {
         if (isInMath && !wasInMathMode) {
             const textBeforeCursor = text.slice(line.from, pos);
-            if (!textBeforeCursor.match(/\\(text|mathrm|textkr)\{([^}]*)$/)) {
-                const engCode = localStorage.getItem('latex-ime-eng') || '1033';
-                if (window.api && window.api.switchToEnglish) window.api.switchToEnglish(engCode); 
+          if (!textBeforeCursor.match(/\\(text|mathrm|textkr)\{([^}]*)$/)) {
+                const engWin = localStorage.getItem('latex-ime-eng') || '1033';
+                const engLinux = localStorage.getItem('latex-linux-eng') || 'keyboard-us';
+                if (window.api && window.api.switchToEnglish) window.api.switchToEnglish(engWin, engLinux); 
                 
                 lastMathEnterTime = Date.now();
             }
         } else if (!isInMath && wasInMathMode) {
-            const korCode = localStorage.getItem('latex-ime-kor') || '1042';
-            if (window.api && window.api.switchToKorean) window.api.switchToKorean(korCode); 
+            const korWin = localStorage.getItem('latex-ime-kor') || '1042';
+            const korLinux = localStorage.getItem('latex-linux-kor') || 'hangul';
+            if (window.api && window.api.switchToKorean) window.api.switchToKorean(korWin, korLinux); 
         }
-    }
+      }
     wasInMathMode = isInMath;
 
-
-
-
-    
-
-
-    
-
-    
     const canUndo = cmCommands.undoDepth(update.state) > 0;
     const canRedo = cmCommands.redoDepth(update.state) > 0;
     if(btnUndo) {
@@ -90,6 +161,11 @@ const text = update.state.doc.toString();
     previewTimeout = setTimeout(() => { checkAndPreviewMath(pos); }, 250); 
   }
 });
+
+
+
+
+
 
 // ==========================================
 // 🚀 에디터 화면 우클릭 메뉴 로직
@@ -514,16 +590,23 @@ document.addEventListener('DOMContentLoaded', () => {
       if (pdfFrame) pdfFrame.style.pointerEvents = 'auto'; 
   });
 });
+const latexLang = latex();
 
 const myEditorExtensions = [
   basicSetup,
   oneDark,
   keymap.of(defaultKeymap),
   keymap.of([cmCommands.indentWithTab]),
-  latex(),
-  latexSuiteExtension,
+  
+  // 🚀 핵심: LaTeX 언어 코어에 직접 자동완성을 주입합니다!
+  latexLang, 
+  latexLang.language.data.of({ autocomplete: bibCompletionProvider }), 
+  
+  snippetConfig.of(latexSuiteExtension),
   ideUpdateListener, 
   autoEngFilter,
+  citeTrigger, // 팝업 트리거 장착
+  
   EditorView.theme({
     "&": { position: "absolute", top: 0, left: 0, right: 0, bottom: 0, width: "100%", height: "100%" },
     ".cm-scroller": { overflow: "auto", width: "100%", height: "100%" }
@@ -558,6 +641,7 @@ function setEditorContent(text) {
     extensions: myEditorExtensions 
   });
   view.setState(newState); 
+  reloadEditorExtensions(); // 🚀 [버그 픽스] 새 파일/빈 화면을 열 때마다 설정값 강제 재주입!
   isSystemChangingContent = false;
 }
 
@@ -604,16 +688,13 @@ function switchTab(index) {
       if (currentTab.cmState) {
           isSystemChangingContent = true;
           view.setState(currentTab.cmState);
+          reloadEditorExtensions(); // 🚀 [버그 픽스] 탭을 전환할 때도 설정값 강제 재주입!
           isSystemChangingContent = false;
-      } else {
+     } else {
           setEditorContent(currentTab.content);
       }
       updateOutline(); 
-
-      setTimeout(() => { 
-          view.requestMeasure(); 
-          window.dispatchEvent(new Event('resize')); 
-      }, 50);
+      forceEditorReflow(); // 🚀 탭 바꿀 때마다 커서 강제 복구!
     }
   } else {
     editorBox.style.display = 'none'; mediaBox.style.display = 'flex'; 
@@ -623,11 +704,17 @@ function switchTab(index) {
     setEditorContent(""); 
   }
   renderTabs();
+  window.forceFocusRecovery();
 }
 
 function addNewTab(filePath = null, content = "% 새 문서를 작성하세요!\n\\documentclass{article}\n\\begin{document}\n\nHello, LaTeX!\n\n\\end{document}", isMedia = false) {
   tabs.push({ path: filePath, content: content, lastSavedContent: content, isMedia: isMedia, isDirty: false });
+  
+  if (filePath && window.api && window.api.watchFile) {
+      window.api.watchFile(filePath);
+  }
   switchTab(tabs.length - 1); 
+  window.forceFocusRecovery();
 }
 
 async function closeTab(index) {
@@ -647,6 +734,11 @@ async function closeTab(index) {
   }
 
   const isActiveTabClosed = (activeTabIndex === index); 
+
+if (tabs[index].path && window.api && window.api.unwatchFile) {
+      window.api.unwatchFile(tabs[index].path);
+  }
+
   tabs.splice(index, 1); 
 
   if (tabs.length === 0) {
@@ -682,9 +774,16 @@ function saveSession() {
 }
 
 function loadSession() {
-  if (typeof currentFolderPath !== 'undefined' && currentFolderPath) loadFolderTree(currentFolderPath);
-  localStorage.removeItem('latex-open-tabs'); localStorage.removeItem('latex-active-tab');
-  tabs = []; activeTabIndex = -1; switchTab(-1); 
+  if (typeof currentFolderPath !== 'undefined' && currentFolderPath) 
+    loadFolderTree(currentFolderPath);
+  // 🚀 임시 저장(세션) 완전 폐기: 시작할 때 무조건 다 날려버리고 텅 빈 상태로 시작!
+  scanAndParseBibFiles(currentFolderPath); // 🚀 앱 켤 때도 자동 스캔!
+  localStorage.removeItem('latex-open-tabs');
+  localStorage.removeItem('latex-active-tab');
+  tabs = []; 
+  activeTabIndex = -1; 
+  switchTab(-1);
+  renderTabs();
 }
 
 // ==========================================
@@ -862,6 +961,7 @@ async function loadFolderTree(folderPath) {
                  addNewTab(item.fullPath, content, isMedia);
                } catch (err) { alert(`파일을 열 수 없습니다.\\n상세: ${err.message}`); }
              }
+             window.forceFocusRecovery();
           };
 
           row.oncontextmenu = (e) => {
@@ -882,8 +982,7 @@ document.getElementById('ctx-new-folder').onclick = async () => { if(!ctxTargetI
 document.getElementById('ctx-rename').onclick = async () => { if(!ctxTargetInfo) return; document.getElementById('context-menu').style.display = 'none'; const oldName = ctxTargetInfo.path.split(/[/\\]/).pop(); const newName = await customPrompt("새 이름", oldName); if(newName && newName !== oldName) { const newPath = ctxTargetInfo.path.replace(oldName, newName); await window.api.renameFile(ctxTargetInfo.path, newPath); tabs.forEach(t => { if(t.path && t.path.startsWith(ctxTargetInfo.path)) t.path = t.path.replace(ctxTargetInfo.path, newPath); }); renderTabs(); loadFolderTree(currentFolderPath); }};
 document.getElementById('ctx-move').onclick = async () => { if(!ctxTargetInfo) return; document.getElementById('context-menu').style.display = 'none'; const relPath = ctxTargetInfo.path.replace(currentFolderPath, '').replace(/^[/\\]/, ''); const newRelPath = await customPrompt("새로운 경로:", relPath); if(newRelPath && newRelPath !== relPath) { const sep = currentFolderPath.includes('\\') ? '\\' : '/'; const newPath = currentFolderPath + sep + newRelPath.replace(/[/\\]/g, sep); try { await window.api.renameFile(ctxTargetInfo.path, newPath); tabs.forEach(t => { if(t.path && t.path.startsWith(ctxTargetInfo.path)) t.path = t.path.replace(ctxTargetInfo.path, newPath); }); renderTabs(); loadFolderTree(currentFolderPath); } catch (e) { alert("이동 실패!"); } }};
 document.getElementById('ctx-delete').onclick = async () => { if(!ctxTargetInfo) return; document.getElementById('context-menu').style.display = 'none'; if(confirm("정말로 삭제하시겠습니까?")) { await window.api.deleteFile(ctxTargetInfo.path); const idx = tabs.findIndex(t => t.path === ctxTargetInfo.path); if(idx !== -1) closeTab(idx); loadFolderTree(currentFolderPath); }};
-document.getElementById('btn-open-folder').onclick = async () => { const path = await window.api.openFolder(); if (path) { currentFolderPath = path; localStorage.setItem('latex-folder-path', path); openFolders.clear(); loadFolderTree(path); }};
-
+document.getElementById('btn-open-folder').onclick = async () => { const path = await window.api.openFolder(); if (path) { currentFolderPath = path; localStorage.setItem('latex-folder-path', path); openFolders.clear(); loadFolderTree(path); scanAndParseBibFiles(path); }}; // 🚀 Bib 파일 자동 스캔 추가!
 // ==========================================
 // 📐 리사이저 & 접기 로직
 // ==========================================
@@ -929,6 +1028,25 @@ pdfPreview.style.display = 'none';
 leftPanel.style.flex = '1'; 
 leftPanel.style.width = 'auto'; 
 btnTogglePdf.innerText = '◀';
+// ==========================================
+// 🚀 I-빔(커서) 증발 방어: 에디터 클릭 시 강제 포커스
+// ==========================================
+document.getElementById('editor-container').addEventListener('mousedown', (e) => {
+  // 좌클릭(0)일 때만 작동 (우클릭 메뉴 방해 안 함)
+  if (e.button === 0) {
+    setTimeout(() => {
+      // CodeMirror가 자체적으로 포커스를 놓쳤더라도 강제로 멱살 잡고 끌고 옴
+      if (view && !view.hasFocus) {
+        view.focus();
+      }
+    }, 50); // 클릭 이벤트가 끝난 직후 실행
+  }
+});
+
+
+
+
+
 
 // ==========================================
 // 🚀 컴파일 및 설정 (저장 시 * 표시 해제)
@@ -973,7 +1091,11 @@ document.getElementById('menu-save-as').onclick = async () => {
   if (activeTabIndex === -1) return; 
   const newPath = await window.api.saveFile(); 
   if (newPath) { 
+    if (tabs[activeTabIndex].path && window.api && window.api.unwatchFile) {
+        window.api.unwatchFile(tabs[activeTabIndex].path);
+    }
     tabs[activeTabIndex].path = newPath; 
+    if (window.api && window.api.watchFile) window.api.watchFile(newPath);
     tabs[activeTabIndex].content = getEditorContent(); 
     await window.api.writeFile(newPath, tabs[activeTabIndex].content); 
     tabs[activeTabIndex].lastSavedContent = tabs[activeTabIndex].content; 
@@ -995,8 +1117,10 @@ document.getElementById('btn-compile').onclick = async () => {
     tab.lastSavedContent = tab.content; 
     tab.isDirty = false; renderTabs(); 
     
-    const compileTimeout = parseInt(localStorage.getItem('latex-timeout-compile') || '60');
-    const res = await window.api.compileLatex(tab.path, compilerSelect.value, compileTimeout);
+  const compileTimeout = parseInt(localStorage.getItem('latex-timeout-compile') || '60');
+    const customArgs = localStorage.getItem('latex-args') || '';
+    const customPath = localStorage.getItem('latex-path') || '';
+    const res = await window.api.compileLatex(tab.path, compilerSelect.value, compileTimeout, customPath, customArgs);
     document.getElementById('pdf-preview').src = `file://${res.pdfPath}?t=${new Date().getTime()}`; 
     logContainer.innerText += `\n${res.log}\n> ✅ 성공!`; 
   } catch (e) { logContainer.innerText += `\n${e}\n> ❌ 실패!`; } 
@@ -1004,9 +1128,6 @@ document.getElementById('btn-compile').onclick = async () => {
 };
 
 const settingsModal = document.getElementById('settings-modal');
-const customSnippetsArea = document.getElementById('custom-snippets');
-let DEFAULT_SNIPPETS_TEMPLATE = "[\n]";
-try { const parts = defaultSnippetsRaw.split('const snippets'); if (parts.length > 1) { let block = parts[1].substring(parts[1].indexOf('[')); const last = block.lastIndexOf(']'); if (last !== -1) DEFAULT_SNIPPETS_TEMPLATE = block.substring(0, last + 1); } } catch(e) {}
 
 // ==========================================
 // 🔮 명령어 팔레트 (Command Palette) 로직
@@ -1025,6 +1146,14 @@ const availableCommands = [
 
 let selectedCmdIndex = 0;
 
+function updateCommandSelection() {
+  const items = cmdList.querySelectorAll('.cmd-item');
+  items.forEach((item, idx) => {
+    if (idx === selectedCmdIndex) item.classList.add('selected');
+    else item.classList.remove('selected');
+  });
+}
+
 function renderCommands(filter = "") {
   cmdList.innerHTML = '';
   const filtered = availableCommands.filter(c => c.name.toLowerCase().includes(filter.toLowerCase()));
@@ -1034,16 +1163,20 @@ function renderCommands(filter = "") {
     const el = document.createElement('div');
     el.className = `cmd-item ${idx === selectedCmdIndex ? 'selected' : ''}`;
     el.innerText = cmd.name;
-    el.onmouseover = () => { selectedCmdIndex = idx; renderCommands(filter); };
+    // 💡 HTML 전체를 갈아엎지 않고 CSS 클래스만 업데이트하여 마우스 클릭을 온전히 유지합니다.
+    el.onmouseover = () => { selectedCmdIndex = idx; updateCommandSelection(); };
     el.onclick = () => { cmdPalette.style.display = 'none'; cmd.action(); };
     cmdList.appendChild(el);
   });
 }
 
+// 이 밑에 있는 keydown 이벤트 리스너에서 renderCommands(cmdInput.value) 라고 되어 있는 부분을
+// updateCommandSelection() 으로 교체해주세요. (아래 참고)
+
 cmdInput.addEventListener('keydown', (e) => {
   const filtered = availableCommands.filter(c => c.name.toLowerCase().includes(cmdInput.value.toLowerCase()));
-  if (e.key === 'ArrowDown') { e.preventDefault(); selectedCmdIndex = (selectedCmdIndex + 1) % filtered.length; renderCommands(cmdInput.value); }
-  else if (e.key === 'ArrowUp') { e.preventDefault(); selectedCmdIndex = (selectedCmdIndex - 1 + filtered.length) % filtered.length; renderCommands(cmdInput.value); }
+  if (e.key === 'ArrowDown') { e.preventDefault(); selectedCmdIndex = (selectedCmdIndex + 1) % filtered.length; updateCommandSelection(); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); selectedCmdIndex = (selectedCmdIndex - 1 + filtered.length) % filtered.length; updateCommandSelection(); }
   else if (e.key === 'Enter' && filtered.length > 0) { cmdPalette.style.display = 'none'; filtered[selectedCmdIndex].action(); }
   else if (e.key === 'Escape') cmdPalette.style.display = 'none';
 });
@@ -1054,8 +1187,12 @@ cmdInput.addEventListener('input', () => { selectedCmdIndex = 0; renderCommands(
 // ⌨️ 글로벌 단축키 및 종료 경고 설정
 // ==========================================
 window.addEventListener('keydown', (e) => {
+  // 💡 설정창이나 텍스트 입력칸에 있을 때는 단축키 훔쳐가기 방지
+  if (document.getElementById('settings-modal').style.display === 'block') return;
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
   const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
-  const cmdOrCtrl = isMac ? e.metaKey : e.ctrlKey;
+  const cmdOrCtrl = isMac ? e.metaKey : e.ctrlKey; // 🚀 범인 검거! 이 변수가 날아가서 단축키가 다 죽어있었습니다.
 
   if (cmdOrCtrl) {
     if (e.key.toLowerCase() === 's' && !e.shiftKey) { e.preventDefault(); document.getElementById('menu-save').click(); } 
@@ -1196,173 +1333,303 @@ const previewStyleSelect = document.getElementById('preview-style-select');
 const engineSelect = document.getElementById('preview-engine-select'); 
 const timeoutCompileInput = document.getElementById('timeout-compile'); 
 const timeoutPreviewInput = document.getElementById('timeout-preview'); 
+// ==========================================
+// ☢️ 설정창 열고 닫기 (물리적 소멸 방식)
+// ==========================================
 
-window.addEventListener('DOMContentLoaded', () => {
-  const eng = localStorage.getItem('latex-engine');
-  if (eng) compilerSelect.value = eng;
-  
-  const pEngine = localStorage.getItem('latex-preview-engine');
-  if (pEngine && engineSelect) engineSelect.value = pEngine;
-  
-  const pStyle = localStorage.getItem('latex-preview-style');
-  if (pStyle && previewStyleSelect) previewStyleSelect.value = pStyle;
-
-  const tComp = localStorage.getItem('latex-timeout-compile');
-  if (tComp && timeoutCompileInput) timeoutCompileInput.value = tComp;
-  
-  const tPrev = localStorage.getItem('latex-timeout-preview');
-  if (tPrev && timeoutPreviewInput) timeoutPreviewInput.value = tPrev;
-
-// 💡 무시 패키지 UI 로딩
- const autoIme = localStorage.getItem('latex-auto-ime');
-  if (autoIme && document.getElementById('auto-ime-select')) document.getElementById('auto-ime-select').value = autoIme;
-  
-  const imeEng = localStorage.getItem('latex-ime-eng');
-  if (imeEng && document.getElementById('ime-code-eng')) document.getElementById('ime-code-eng').value = imeEng;
-
-  const imeKor = localStorage.getItem('latex-ime-kor');
-  if (imeKor && document.getElementById('ime-code-kor')) document.getElementById('ime-code-kor').value = imeKor;
-
-  // 💡 무시 패키지 UI 로딩
-  const ignorePkgsInput = document.getElementById('preview-ignore-packages');
-  const savedIgnorePkgs = localStorage.getItem('latex-preview-ignore-packages');
-  const DEFAULT_IGNORE_PKGS = "tikz, pgfplots, geometry, hyperref, fancyhdr, titlesec, tcolorbox, xcolor";
-  if (ignorePkgsInput) {
-      ignorePkgsInput.value = savedIgnorePkgs !== null ? savedIgnorePkgs : DEFAULT_IGNORE_PKGS;
-  }
-
-  customSnippetsArea.value = localStorage.getItem('latex-custom-snippets') || DEFAULT_SNIPPETS_TEMPLATE;
-  loadSession(); 
-});
-
-document.getElementById('btn-settings').onclick = () => settingsModal.style.display = 'block';
-document.getElementById('close-settings').onclick = () => settingsModal.style.display = 'none';
-
-document.getElementById('btn-reset-snippets').onclick = () => {
-  if (confirm("초기화하시겠습니까?")) customSnippetsArea.value = DEFAULT_SNIPPETS_TEMPLATE;
+document.getElementById('btn-settings').onclick = () => {
+    document.getElementById('toolbar').style.display = 'none';
+    document.getElementById('main-content').style.display = 'none';
+    settingsModal.style.display = 'block';
 };
 
-// 💡 무시 패키지 초기화 (이전에 누락되었던 로직 추가!)
-const btnResetIgnore = document.getElementById('btn-reset-ignore-pkgs');
-if (btnResetIgnore) {
-    btnResetIgnore.onclick = () => {
-        if (confirm("무시 패키지 목록을 기본값으로 초기화하시겠습니까?")) {
-            document.getElementById('preview-ignore-packages').value = "tikz, pgfplots, geometry, hyperref, fancyhdr, titlesec, tcolorbox, xcolor";
-        }
-    };
-}
-
-
-
-document.getElementById('btn-save-settings').onclick = () => {
-  try {
-    new Function("return " + customSnippetsArea.value)();
-    localStorage.setItem('latex-engine', compilerSelect.value);
-    if (engineSelect) localStorage.setItem('latex-preview-engine', engineSelect.value);
-    if (previewStyleSelect) localStorage.setItem('latex-preview-style', previewStyleSelect.value);
-    
-    if (timeoutCompileInput) localStorage.setItem('latex-timeout-compile', timeoutCompileInput.value);
-    if (timeoutPreviewInput) localStorage.setItem('latex-timeout-preview', timeoutPreviewInput.value);
-    
-   const ignorePkgsInput = document.getElementById('preview-ignore-packages');
-    if (ignorePkgsInput) localStorage.setItem('latex-preview-ignore-packages', ignorePkgsInput.value);
-
-    // 💡 한/영 자동 전환 및 키보드 코드 설정 저장
-    if (document.getElementById('auto-ime-select')) localStorage.setItem('latex-auto-ime', document.getElementById('auto-ime-select').value);
-    if (document.getElementById('ime-code-eng')) localStorage.setItem('latex-ime-eng', document.getElementById('ime-code-eng').value);
-    if (document.getElementById('ime-code-kor')) localStorage.setItem('latex-ime-kor', document.getElementById('ime-code-kor').value);
-
-    localStorage.setItem('latex-custom-snippets', customSnippetsArea.value);
-
-
+document.getElementById('close-settings').onclick = () => {
     settingsModal.style.display = 'none';
-    
-    lastCompiledMath = ""; 
-    
-    location.reload(); 
-  } catch(e) { alert("오류: " + e.message); }
+    document.getElementById('toolbar').style.display = 'flex';
+    document.getElementById('main-content').style.display = 'flex';
+    setTimeout(() => {
+        void document.body.offsetHeight; 
+        window.dispatchEvent(new Event('resize'));
+        if (activeTabIndex !== -1 && typeof view !== 'undefined') {
+            view.requestMeasure(); 
+            view.focus();
+        }
+    }, 50);
 };
 
-// ==========================================
-// 🛡️ 외부 수정 덮어쓰기 방지 (Phantom Overwrite Watcher)
-// ==========================================
-window.addEventListener('focus', async () => {
-  if (activeTabIndex === -1) return;
-  const tab = tabs[activeTabIndex];
-  if (!tab.path || tab.isMedia) return;
-
-  try {
-     const diskContent = await window.api.readFile(tab.path);
-     
-     if (tab.lastSavedContent !== undefined && diskContent !== tab.lastSavedContent) {
-         if (confirm("⚠️ 외부 프로그램에서 이 파일이 수정되었습니다.\n최신 내용을 다시 불러오시겠습니까?\n\n(확인: 외부 내용 불러오기 / 취소: 현재 에디터 내용 유지)")) {
-             tab.content = diskContent;
-             tab.lastSavedContent = diskContent; 
-             if (tab.cmState) tab.cmState = null; 
-             setEditorContent(diskContent);
-             tab.isDirty = false;
-             renderTabs();
-         } else {
-             tab.lastSavedContent = diskContent; 
-             tab.isDirty = true;
-             renderTabs();
-         }
-     }
-  } catch(e) { console.warn("파일 상태 감지 실패:", e); }
-});
 
 // ==========================================
-// 🦊 파이어폭스식 탭 스크롤 버튼 & 마우스 휠 기능 자동 추가
+// 📦 스니펫 엔진 (순정 배열 모드 & 토글 스위치 탑재)
+// ==========================================
+
+let DEFAULT_SNIPPETS = "[]";
+try { 
+    const raw = defaultSnippetsRaw;
+    const start = raw.indexOf('=') + 1;
+    const end = raw.lastIndexOf('export default');
+    DEFAULT_SNIPPETS = raw.substring(start, end !== -1 ? end : raw.length).trim();
+    if (DEFAULT_SNIPPETS.endsWith(';')) DEFAULT_SNIPPETS = DEFAULT_SNIPPETS.slice(0, -1);
+} catch(e) {}
+
+function reloadEditorExtensions() {
+    // 💡 스위치 상태 읽기 (기본값은 true)
+    const useSnippets = localStorage.getItem('latex-enable-snippets') !== 'false';
+    const useBrackets = localStorage.getItem('latex-enable-brackets') !== 'false';
+
+    const extensionsToLoad = [];
+
+    // 🚀 1. 스니펫 엔진 스위치
+    if (useSnippets) {
+        // 엔진을 켰을 때만 플러그인을 에디터에 주입합니다.
+        const latexExtension = main(codemirror_objects);
+        extensionsToLoad.push(latexExtension);
+    }
+
+    // 🚀 2. 괄호 및 $ 자동 완성 스위치 (CodeMirror 공식 문서 적용!)
+    // 기본 탑재된 basicSetup이 맘대로 괄호를 닫지 못하게 'Prec.highest(최우선 순위)'로 덮어씁니다.
+    if (useBrackets) {
+        // 켰을 때: $, {, [, ( 등을 완벽하게 닫아줌
+        extensionsToLoad.push(
+            cmState.Prec.highest(
+                cmState.EditorState.languageData.of(() => [{ 
+                    closeBrackets: { brackets: ["(", "[", "{", "'", '"'] }
+                }])
+            )
+        );
+    } else {
+        // 껐을 때: 빈 배열([])을 최우선으로 던져서, 기본 괄호 기능조차 완벽하게 먹통으로 만듦
+        extensionsToLoad.push(
+            cmState.Prec.highest(
+                cmState.EditorState.languageData.of(() => [{ 
+                    closeBrackets: { brackets: [] } 
+                }])
+            )
+        );
+    }
+
+    // 에디터 재부팅 및 적용
+    if (typeof view !== 'undefined' && view) {
+        view.dispatch({ effects: snippetConfig.reconfigure(extensionsToLoad) });
+    }
+}
+// ==========================================
+// 🚀 초기화 및 탭/버튼 이벤트
 // ==========================================
 window.addEventListener('DOMContentLoaded', () => {
-  const tabBar = document.getElementById('tab-bar');
-  if (!tabBar || tabBar.dataset.wrapped) return;
-  tabBar.dataset.wrapped = "true"; // 중복 실행 방지
-  
-  const parent = tabBar.parentNode;
-  
-  // 탭바와 버튼을 감싸는 새로운 상자 만들기
-  const wrapper = document.createElement('div');
-  wrapper.style.display = 'flex';
-  wrapper.style.alignItems = 'center';
-  wrapper.style.backgroundColor = '#21252b';
-  wrapper.style.borderBottom = '1px solid #181a1f';
-  wrapper.style.flex = 'none';
-  wrapper.style.width = '100%';
-  wrapper.style.overflow = 'hidden';
+    
+    // 탭 클릭 작동
+    const sidebarItems = document.querySelectorAll('#settings-sidebar div');
+    const sections = document.querySelectorAll('.settings-section');
+    sidebarItems.forEach(item => {
+        item.onclick = (e) => {
+            e.preventDefault();
+            sidebarItems.forEach(i => i.classList.remove('active'));
+            item.classList.add('active');
+            const targetId = item.getAttribute('data-target');
+            sections.forEach(sec => sec.classList.remove('active'));
+            document.getElementById(targetId).classList.add('active');
+            window.forceFocusRecovery();
+        };
+    });
 
-  // ◀ 왼쪽 버튼 생성
-  const btnLeft = document.createElement('div');
-  btnLeft.innerHTML = '&#9664;'; 
-  btnLeft.style.cssText = 'padding: 8px 12px; color: #abb2bf; cursor: pointer; user-select: none; font-size: 12px; background: #282c34; z-index: 10; box-shadow: 2px 0 5px rgba(0,0,0,0.3);';
-  btnLeft.onclick = () => tabBar.scrollBy({ left: -200, behavior: 'smooth' }); // 왼쪽으로 부드럽게 이동
-  btnLeft.onmouseover = () => btnLeft.style.color = '#61afef';
-  btnLeft.onmouseout = () => btnLeft.style.color = '#abb2bf';
+    // 경로 탐색 버튼
+    const btnSelectPath = document.getElementById('btn-select-path');
+    if (btnSelectPath) btnSelectPath.onclick = async (e) => { 
+        e.preventDefault();
+        const p = await window.api.openFolder(); 
+        if (p) { document.getElementById('latex-path').value = p; } 
+        window.forceFocusRecovery(document.getElementById('latex-path')); 
+    };
+    
+    const btnDetect = document.getElementById('btn-auto-detect-path');
+    if (btnDetect) btnDetect.onclick = async (e) => { 
+        e.preventDefault();
+        const p = await window.api.detectLatexPath(); 
+        if (p) { 
+            document.getElementById('latex-path').value = p; 
+            await window.api.askConfirm("경로를 성공적으로 찾았습니다:\n" + p); 
+        } 
+        window.forceFocusRecovery(document.getElementById('latex-path')); 
+    };
 
-  // ▶ 오른쪽 버튼 생성
-  const btnRight = document.createElement('div');
-  btnRight.innerHTML = '&#9654;'; 
-  btnRight.style.cssText = 'padding: 8px 12px; color: #abb2bf; cursor: pointer; user-select: none; font-size: 12px; background: #282c34; z-index: 10; box-shadow: -2px 0 5px rgba(0,0,0,0.3);';
-  btnRight.onclick = () => tabBar.scrollBy({ left: 200, behavior: 'smooth' }); // 오른쪽으로 부드럽게 이동
-  btnRight.onmouseover = () => btnRight.style.color = '#61afef';
-  btnRight.onmouseout = () => btnRight.style.color = '#abb2bf';
+    // 💡 일반 설정값 및 스위치 로드
+  // 💡 일반 설정값 및 스위치 로드 (HTML ID와 LocalStorage 키값 1:1 매핑)
+    const idToKey = {
+        'compiler-select': 'latex-engine',
+        'preview-engine-select': 'latex-preview-engine',
+        'preview-style-select': 'latex-preview-style',
+        'timeout-compile': 'latex-timeout-compile',
+        'timeout-preview': 'latex-timeout-preview',
+        'auto-ime-select': 'latex-auto-ime',
+        'ime-code-eng': 'latex-ime-eng',
+        'ime-code-kor': 'latex-ime-kor',
+        'ime-linux-eng': 'latex-linux-eng',
+        'ime-linux-kor': 'latex-linux-kor',
+        'latex-path': 'latex-path',
+        'latex-args': 'latex-args',
+        'preview-ignore-packages': 'latex-preview-ignore-packages'
+    };
 
-  // 기존 탭바 디자인 다듬기
-  tabBar.style.borderBottom = 'none';
-  tabBar.style.flex = '1';
-  tabBar.style.scrollbarWidth = 'none'; // 지저분한 기본 스크롤바 숨김 완전 적용
-  
-  // 요소들 조립하기
-  parent.insertBefore(wrapper, tabBar);
-  wrapper.appendChild(btnLeft);
-  wrapper.appendChild(tabBar);
-  wrapper.appendChild(btnRight);
+    // 💡 위 사전을 바탕으로 설정값 불러오기
+    Object.keys(idToKey).forEach(id => {
+        const key = idToKey[id];
+        const val = localStorage.getItem(key);
+        if (val !== null && document.getElementById(id)) {
+            document.getElementById(id).value = val;
+        }
+    });
 
-  // 💡 마우스 휠로도 가로 스크롤 가능하게 추가 (크롬, VS Code 스타일)
-  tabBar.addEventListener('wheel', (e) => {
-      if (e.deltaY !== 0) {
-          e.preventDefault();
-          tabBar.scrollBy({ left: e.deltaY > 0 ? 100 : -100 });
-      }
-  });
+
+
+    const toggleSnippets = document.getElementById('toggle-auto-snippets');
+    if (toggleSnippets) toggleSnippets.checked = localStorage.getItem('latex-enable-snippets') !== 'false';
+    
+    const toggleBrackets = document.getElementById('toggle-auto-brackets');
+    if (toggleBrackets) toggleBrackets.checked = localStorage.getItem('latex-enable-brackets') !== 'false';
+
+    // 스니펫 텍스트 로드
+    const snippetEditor = document.getElementById('custom-snippets');
+    let savedSnips = localStorage.getItem('latex-custom-snippets') || DEFAULT_SNIPPETS;
+    if (savedSnips.trim().startsWith('{')) {
+        savedSnips = DEFAULT_SNIPPETS;
+        localStorage.setItem('latex-custom-snippets', savedSnips);
+    }
+    if (snippetEditor) snippetEditor.value = savedSnips;
+
+    // 기본값 복구 버튼들
+    const btnResetSnippets = document.getElementById('btn-reset-snippets');
+    if (btnResetSnippets) {
+        btnResetSnippets.onclick = async (e) => {
+            e.preventDefault();
+            const isOk = await window.api.askConfirm("스니펫을 초기 배열로 되돌릴까요?");
+            if (isOk) {
+                snippetEditor.value = DEFAULT_SNIPPETS;
+                window.forceFocusRecovery(snippetEditor);
+            }
+        };
+    }
+    
+    const btnResetIgnore = document.getElementById('btn-reset-ignore-pkgs');
+    if (btnResetIgnore) {
+        btnResetIgnore.onclick = async (e) => {
+            e.preventDefault();
+            const isOk = await window.api.askConfirm("무시 패키지 목록을 초기화할까요?");
+            if (isOk) {
+                const igInput = document.getElementById('preview-ignore-packages');
+                igInput.value = "tikz, pgfplots, geometry, hyperref, fancyhdr, titlesec, tcolorbox, xcolor";
+                window.forceFocusRecovery(igInput);
+            }
+        };
+    }
+
+    // 💡 최종 저장 버튼
+    const btnSaveSettings = document.getElementById('btn-save-settings');
+    if (btnSaveSettings) {
+        btnSaveSettings.onclick = (e) => {
+            e.preventDefault();
+            try {
+                const parsed = new Function("return " + snippetEditor.value)();
+                if (!Array.isArray(parsed)) throw new Error("배열([ ]) 형식이 아닙니다.");
+
+                // 데이터 저장
+                localStorage.setItem('latex-custom-snippets', snippetEditor.value);
+                localStorage.setItem('latex-enable-snippets', toggleSnippets.checked);
+                localStorage.setItem('latex-enable-brackets', toggleBrackets.checked);
+                
+                Object.keys(idToKey).forEach(id => {
+                    const key = idToKey[id];
+                    const el = document.getElementById(id);
+                    if (el) localStorage.setItem(key, el.value);
+                });
+
+                document.getElementById('close-settings').click(); 
+                reloadEditorExtensions(); 
+                window.forceFocusRecovery();
+            } catch(err) {
+                alert("🚨 문법 오류!\n" + err.message);
+                window.forceFocusRecovery(snippetEditor);
+            }
+        };
+    }
+
+    loadSession(); 
+    reloadEditorExtensions(); 
 });
+
+
+// ==========================================
+// 🔥 강제 테스트: 에디터 켜지자마자 파서가 작동하는지 확인!
+// ==========================================
+setTimeout(() => {
+    console.log("====================================");
+    console.log("🚀 자체 파서 테스트 시작!");
+    
+    // 1. 파서 작동 테스트
+    try {
+        const testBib = `@article{test2026, title={Hello World}, author={Eugene}, year={2026}}`;
+        const result = parseBibTeX(testBib);
+        console.log("✅ 1. 파서 결과:", result);
+    } catch (e) {
+        console.error("❌ 1. 파서가 죽었습니다:", e);
+    }
+
+    
+    console.log("====================================");
+}, 2000); // 에디터 켜지고 2초 뒤에 콘솔에 쏩니다
+
+
+
+// ==========================================
+// 👁️ 외부 변경 감지 (File Watcher) 이벤트 수신
+// ==========================================
+if (window.api && window.api.onFileChangedExternally) {
+  window.api.onFileChangedExternally(async (event, filePath) => {
+    // 열려있는 탭 중에 해당 파일이 있는지 확인
+    const tabIndex = tabs.findIndex(t => t.path === filePath);
+    if (tabIndex === -1) return; 
+
+    try {
+      // 외부에서 변경된 최신 내용을 조용히 읽어옴
+      const newContent = await window.api.readFile(filePath);
+      const tab = tabs[tabIndex];
+      
+      // 💡 [핵심 방어] 내가 에디터에서 Ctrl+S를 눌러서 저장한 직후라면?
+      // 파일 내용이 이미 에디터의 마지막 저장본과 100% 동일하므로 조용히 무시합니다.
+      if (newContent === tab.lastSavedContent) return;
+
+      // 내용이 다르다면 사용자에게 경고창 띄우기
+      let msg = `[${filePath.split(/[/\\]/).pop()}] 파일이 외부 프로그램에 의해 변경되었습니다.\n새로운 내용을 에디터로 불러오시겠습니까?`;
+      if (tab.isDirty) {
+        msg += "\n\n🚨 주의: 현재 에디터에서 작성 중이던 '저장되지 않은 변경사항'이 모두 날아갑니다!";
+      }
+
+      const isOk = await window.api.askConfirm(msg);
+      if (isOk) {
+        // 승낙하면 최신 내용으로 교체
+        tab.content = newContent;
+        tab.lastSavedContent = newContent;
+        tab.isDirty = false; // 오염 상태 초기화
+        
+        if (activeTabIndex === tabIndex) {
+          // 1. 사용자가 현재 그 탭을 보고 있다면 화면 즉시 갱신
+          setEditorContent(newContent);
+        } else if (tab.cmState) {
+          // 2. 다른 탭을 보고 있다면, 백그라운드 탭의 메모리 상태(State)만 조용히 덮어쓰기
+          tab.cmState = EditorState.create({
+            doc: newContent,
+            extensions: myEditorExtensions 
+          });
+        }
+        renderTabs(); // 탭 바 갱신 (* 표시 지우기)
+        
+        const logBox = document.getElementById('log-container');
+        if(logBox) {
+            logBox.innerText += `\n> 🔄 외부 변경 감지: ${filePath.split(/[/\\]/).pop()} 최신화 완료`;
+            logBox.scrollTop = logBox.scrollHeight;
+        }
+      }
+    } catch(e) {
+      console.error("외부 파일 갱신 실패:", e);
+    }
+  });
+}
